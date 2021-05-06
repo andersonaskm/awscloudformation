@@ -1,0 +1,569 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+
+    "Description": "Template para criação de uma aplicação utilizando Apache como servidor Http.",
+
+    "Parameters": {
+        "InstanceType": {
+            "Description": "Tipo de instância do EC2",
+            "Type": "String",
+            "Default": "t2.micro",
+            "AllowedValues": ["t2.micro"],
+            "ConstraintDescription": "deve ser um valor válido de instância EC2."
+        },
+
+        "KeyName": {
+            "Description": "Nome de um KeyPair para permitir acesso SSH",
+            "Type": "AWS::EC2::KeyPair::KeyName",
+            "Default": "kp_ppk_cloudformation",
+            "ConstraintDescription": "deve ser um valor válido EC2 KeyPair."
+        },
+
+        "SSHLocation": {
+            "Description": "Range de IP que poderá ser usado para realizar SSH nas instâncias EC2",
+            "Type": "String",
+            "MinLength": "9",
+            "MaxLength": "18",
+            "Default": "0.0.0.0/0",
+            "AllowedPattern": "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})",
+            "ConstraintDescription": "deve ser um valor válido IP CIDR no formato x.x.x.x/x."
+        },
+        "AlarmEmail": {
+            "Description": "Email responsável por receber as notificações de alerta",
+            "Type": "String"
+        }
+    },
+
+    "Mappings": {
+        "Region2Examples": {
+            "us-east-2": {
+                "Examples": "https://s3-us-east-2.amazonaws.com/cloudformation-examples-us-east-2"
+            }
+        },
+        "AWSInstanceType2Arch": {
+            "t2.micro": {
+                "Arch": "HVM64"
+            }
+        },
+        "AWSRegionArch2AMI": {
+            "us-east-2": {
+                "HVM64": "ami-0f57b4cec24530068",
+                "HVMG2": "NOT_SUPPORTED"
+            }
+        },
+        "Region2Principal": {
+            "us-east-2": {
+                "EC2Principal": "ec2.amazonaws.com",
+                "OpsWorksPrincipal": "opsworks.amazonaws.com"
+            }
+        },
+        "Region2ARNPrefix": {
+            "us-east-2": {
+                "ARNPrefix": "arn:aws:"
+            }
+        }
+
+    },
+
+    "Resources": {
+        "LogRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Principal": {
+                            "Service": [{
+                                "Fn::FindInMap": ["Region2Principal", {
+                                    "Ref": "AWS::Region"
+                                }, "EC2Principal"]
+                            }]
+                        },
+                        "Action": ["sts:AssumeRole"]
+                    }]
+                },
+                "Path": "/",
+                "Policies": [{
+                    "PolicyName": "LogRolePolicy",
+                    "PolicyDocument": {
+                        "Version": "2012-10-17",
+                        "Statement": [{
+                            "Effect": "Allow",
+                            "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogStreams"],
+                            "Resource": [{
+                                "Fn::Join": ["", [{
+                                        "Fn::FindInMap": ["Region2ARNPrefix", {
+                                            "Ref": "AWS::Region"
+                                        }, "ARNPrefix"]
+                                    },
+                                    "logs:*:*:*"
+                                ]]
+                            }]
+                        }]
+                    }
+                }]
+            }
+        },
+
+        "LogRoleInstanceProfile": {
+            "Type": "AWS::IAM::InstanceProfile",
+            "Properties": {
+                "Path": "/",
+                "Roles": [{
+                    "Ref": "LogRole"
+                }]
+            }
+        },
+
+        "CloudFormationLogs": {
+            "Type": "AWS::Logs::LogGroup",
+            "Properties": {
+                "RetentionInDays": 7
+            }
+        },
+
+        "WebServer": {
+            "Type": "AWS::EC2::Instance",
+            "Metadata": {
+                "AWS::CloudFormation::Init": {
+                    "configSets": {
+                        "install_all": ["install_cfn", "install_app", "install_logs"]
+                    },
+
+                    "install_cfn": {
+                        "files": {
+                            "/etc/cfn/cfn-hup.conf": {
+                                "content": {
+                                    "Fn::Join": ["", [
+                                        "[main]\n",
+                                        "stack=", {
+                                            "Ref": "AWS::StackId"
+                                        }, "\n",
+                                        "region=", {
+                                            "Ref": "AWS::Region"
+                                        }, "\n"
+                                    ]]
+                                },
+                                "mode": "000400",
+                                "owner": "root",
+                                "group": "root"
+                            },
+
+                            "/etc/cfn/hooks.d/cfn-auto-reloader.conf": {
+                                "content": {
+                                    "Fn::Join": ["", [
+                                        "[cfn-auto-reloader-hook]\n",
+                                        "triggers=post.update\n",
+                                        "path=Resources.WebServer.Metadata.AWS::CloudFormation::Init\n",
+                                        "action=/opt/aws/bin/cfn-init -v ",
+                                        "         --stack ", {
+                                            "Ref": "AWS::StackName"
+                                        },
+                                        "         --resource WebServer ",
+                                        "         --configsets install_all ",
+                                        "         --region ", {
+                                            "Ref": "AWS::Region"
+                                        }, "\n",
+                                        "runas=root\n"
+                                    ]]
+                                },
+                                "mode": "000400",
+                                "owner": "root",
+                                "group": "root"
+                            }
+                        },
+
+                        "services": {
+                            "sysvinit": {
+                                "cfn-hup": {
+                                    "enabled": "true",
+                                    "ensureRunning": "true",
+                                    "files": ["/etc/cfn/cfn-hup.conf", "/etc/cfn/hooks.d/cfn-auto-reloader.conf"]
+                                }
+                            }
+                        }
+                    },
+
+                    "install_app": {
+                        "files": {
+                            "/var/www/html/index.html": {
+                                "content": {
+                                    "Fn::Join": ["\n", [
+                                        "<h1>Site construído com o Cloud Formation.</h1>"
+                                    ]]
+                                },
+                                "mode": "000644",
+                                "owner": "root",
+                                "group": "root"
+                            }
+                        }
+                    },
+
+
+                    "install_logs": {
+                        "files": {
+                            "/etc/awslogs/awslogs.conf": {
+                                "content": {
+                                    "Fn::Join": ["", [
+                                        "[general]\n",
+                                        "state_file= /var/awslogs/state/agent-state\n",
+
+                                        "[/var/log/cloud-init.log]\n",
+                                        "file = /var/log/cloud-init.log\n",
+                                        "log_group_name = ", {
+                                            "Ref": "CloudFormationLogs"
+                                        }, "\n",
+                                        "log_stream_name = {instance_id}/cloud-init.log\n",
+                                        "datetime_format = \n",
+
+                                        "[/var/log/cloud-init-output.log]\n",
+                                        "file = /var/log/cloud-init-output.log\n",
+                                        "log_group_name = ", {
+                                            "Ref": "CloudFormationLogs"
+                                        }, "\n",
+                                        "log_stream_name = {instance_id}/cloud-init-output.log\n",
+                                        "datetime_format = \n",
+
+                                        "[/var/log/cfn-init.log]\n",
+                                        "file = /var/log/cfn-init.log\n",
+                                        "log_group_name = ", {
+                                            "Ref": "CloudFormationLogs"
+                                        }, "\n",
+                                        "log_stream_name = {instance_id}/cfn-init.log\n",
+                                        "datetime_format = \n",
+
+                                        "[/var/log/cfn-hup.log]\n",
+                                        "file = /var/log/cfn-hup.log\n",
+                                        "log_group_name = ", {
+                                            "Ref": "CloudFormationLogs"
+                                        }, "\n",
+                                        "log_stream_name = {instance_id}/cfn-hup.log\n",
+                                        "datetime_format = \n",
+
+                                        "[/var/log/cfn-wire.log]\n",
+                                        "file = /var/log/cfn-wire.log\n",
+                                        "log_group_name = ", {
+                                            "Ref": "CloudFormationLogs"
+                                        }, "\n",
+                                        "log_stream_name = {instance_id}/cfn-wire.log\n",
+                                        "datetime_format = \n",
+
+                                        "[/var/log/httpd]\n",
+                                        "file = /var/log/httpd/*\n",
+                                        "log_group_name = ", {
+                                            "Ref": "CloudFormationLogs"
+                                        }, "\n",
+                                        "log_stream_name = {instance_id}/httpd\n",
+                                        "datetime_format = %d/%b/%Y:%H:%M:%S\n"
+                                    ]]
+                                },
+                                "mode": "000444",
+                                "owner": "root",
+                                "group": "root"
+                            },
+                            "/etc/awslogs/awscli.conf": {
+                                "content": {
+                                    "Fn::Join": ["", [
+                                        "[plugins]\n",
+                                        "cwlogs = cwlogs\n",
+                                        "[default]\n",
+                                        "region = ", {
+                                            "Ref": "AWS::Region"
+                                        }, "\n"
+                                    ]]
+                                },
+                                "mode": "000444",
+                                "owner": "root",
+                                "group": "root"
+                            }
+                        },
+                        "commands": {
+                            "01_create_state_directory": {
+                                "command": "mkdir -p /var/awslogs/state"
+                            }
+                        }
+                    }
+
+                }
+            },
+            "Properties": {
+                "SecurityGroups": [{
+                    "Ref": "WebServerSecurityGroup"
+                }],
+                "KeyName": {
+                    "Ref": "KeyName"
+                },
+                "InstanceType": {
+                    "Ref": "InstanceType"
+                },
+                "IamInstanceProfile": {
+                    "Ref": "LogRoleInstanceProfile"
+                },
+                "ImageId": {
+                    "Fn::FindInMap": ["AWSRegionArch2AMI", {
+                            "Ref": "AWS::Region"
+                        },
+                        {
+                            "Fn::FindInMap": ["AWSInstanceType2Arch", {
+                                    "Ref": "InstanceType"
+                                },
+                                "Arch"
+                            ]
+                        }
+                    ]
+                },
+                "UserData": {
+                    "Fn::Base64": {
+                        "Fn::Join": ["", [
+                            "#!/bin/bash -xe\n",
+                            "yum update -y\n",
+                            "yum update -y aws-cfn-bootstrap\n",
+
+                            "#Install awslogs\n",
+                            "yum install -y awslogs\n",
+
+                            "#Install Apache\n",
+                            "yum install -y httpd\n",
+                            "yum install -y mod_ssl\n",
+
+                            "#Start cfn-init\n",
+                            "/opt/aws/bin/cfn-init -v ",
+                            "         --stack ", {
+                                "Ref": "AWS::StackName"
+                            },
+                            "         --resource WebServer ",
+                            "         --configsets install_all ",
+                            "         --region ", {
+                                "Ref": "AWS::Region"
+                            }, "\n",
+
+                            "#Start Apache\n",
+                            "systemctl start httpd\n",
+                            "systemctl enable httpd\n",
+
+                            "#Start AWS Logs\n",
+                            "systemctl start awslogsd\n",
+                            "systemctl enable awslogsd.service\n",
+
+                            "# Start up the cfn-hup daemon to listen for changes to the EC2 instance metadata\n",
+                            "/opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'\n",
+
+                            "/opt/aws/bin/cfn-signal -e $? ",
+                            "         --stack ", {
+                                "Ref": "AWS::StackName"
+                            },
+                            "         --resource WebServer ",
+                            "         --region ", {
+                                "Ref": "AWS::Region"
+                            }, "\n"
+                        ]]
+                    }
+                }
+            },
+            "CreationPolicy": {
+                "ResourceSignal": {
+                    "Timeout": "PT5M"
+                }
+            }
+        },
+
+        "WebServerSecurityGroup": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "GroupDescription": "Habilita acesso SSH, HTTP, HTTPs na porta de entrada",
+                "SecurityGroupIngress": [{
+                        "IpProtocol": "tcp",
+                        "FromPort": 22,
+                        "ToPort": 22,
+                        "CidrIp": {
+                            "Ref": "SSHLocation"
+                        }
+                    },
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": 80,
+                        "ToPort": 80,
+                        "CidrIp": "0.0.0.0/0"
+                    },
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": 443,
+                        "ToPort": 443,
+                        "CidrIp": "0.0.0.0/0"
+                    }
+                ]
+            }
+        },
+
+        "IpAddress": {
+            "Type": "AWS::EC2::EIP"
+        },
+
+        "IpAssoc": {
+            "Type": "AWS::EC2::EIPAssociation",
+            "Properties": {
+                "EIP": {
+                    "Ref": "IpAddress"
+                },
+                "InstanceId": {
+                    "Ref": "WebServer"
+                }
+            }
+        },
+
+        "404MetricFilter": {
+            "Type": "AWS::Logs::MetricFilter",
+            "Properties": {
+                "LogGroupName": {
+                    "Ref": "CloudFormationLogs"
+                },
+                "FilterPattern": "[ip, identity, user_id, timestamp, request, status_code = 404, size, ...]",
+                "MetricTransformations": [{
+                    "MetricValue": "1",
+                    "MetricNamespace": "teste/404s",
+                    "MetricName": "teste404Qtd"
+                }]
+            }
+        },
+        "BytesTransferredMetricFilter": {
+            "Type": "AWS::Logs::MetricFilter",
+            "Properties": {
+                "LogGroupName": {
+                    "Ref": "CloudFormationLogs"
+                },
+                "FilterPattern": "[ip, identity, user_id, timestamp, request, status_code, size, ...]",
+                "MetricTransformations": [{
+                    "MetricValue": "$size",
+                    "MetricNamespace": "teste/BytesTransferred",
+                    "MetricName": "testeBytesTransferred"
+                }]
+            }
+        },
+        "404Alarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "Properties": {
+                "AlarmDescription": "Qtd de erros 404s é maior que 2 dentro de 2 minutos",
+                "MetricName": "teste404Qtd",
+                "Namespace": "teste/404s",
+                "Statistic": "Sum",
+                "Period": 60,
+                "EvaluationPeriods": 2,
+                "Threshold": 2,
+                "AlarmActions": [{
+                    "Ref": "AlarmNotificationTopic"
+                }],
+                "ComparisonOperator": "GreaterThanThreshold"
+            }
+        },
+        "BandwidthAlarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "Properties": {
+                "AlarmDescription": "O volume médio de tráfego é maior que 3500 KB em 10 minutos",
+                "MetricName": "testeBytesTransferred",
+                "Namespace": "teste/BytesTransferred",
+                "Statistic": "Average",
+                "Period": 300,
+                "EvaluationPeriods": 2,
+                "Threshold": 3500,
+                "AlarmActions": [{
+                    "Ref": "AlarmNotificationTopic"
+                }],
+                "ComparisonOperator": "GreaterThanThreshold"
+            }
+        },
+
+        "CPUAlarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "Properties": {
+                "AlarmDescription": "Alarme de uso de CPU - 90% mais de 60 segundos, durante 2 vezes",
+                "MetricName": "CPUUtilization",
+                "Namespace": "AWS/EC2",
+                "Statistic": "Average",
+                "Period": 60,
+                "EvaluationPeriods": 2,
+                "Threshold": 90,
+                "AlarmActions": [{
+                    "Ref": "AlarmNotificationTopic"
+                }],
+                "ComparisonOperator": "GreaterThanThreshold",
+                "Dimensions": [{
+                    "Name": "InstanceId",
+                    "Value": {
+                        "Ref": "WebServer"
+                    }
+                }]
+            }
+        },
+
+        "MemoryAlarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "Properties": {
+                "AlarmDescription": "Alarme de uso de CPU - 70% mais de 120 segundos, durante 2 vezes",
+                "MetricName": "MemoryUtilization",
+                "Namespace": "AWS/EC2",
+                "Statistic": "Average",
+                "Period": 120,
+                "EvaluationPeriods": 2,
+                "Threshold": 70,
+                "AlarmActions": [{
+                    "Ref": "AlarmNotificationTopic"
+                }],
+                "ComparisonOperator": "GreaterThanThreshold",
+                "Dimensions": [{
+                    "Name": "InstanceId",
+                    "Value": {
+                        "Ref": "WebServer"
+                    }
+                }]
+            }
+        },
+
+        "AlarmNotificationTopic": {
+            "Type": "AWS::SNS::Topic",
+            "Properties": {
+                "Subscription": [{
+                    "Endpoint": {
+                        "Ref": "AlarmEmail"
+                    },
+                    "Protocol": "email"
+                }]
+            }
+        }
+
+    },
+
+    "Outputs": {
+        "InstanceId": {
+            "Description": "Instance ID do web server",
+            "Value": {
+                "Ref": "WebServer"
+            }
+        },
+
+        "URL": {
+            "Description": "Website Marketing Order Details",
+            "Value": {
+                "Fn::Join": ["", ["http://", {
+                    "Fn::GetAtt": ["WebServer", "PublicDnsName"]
+                }]]
+            }
+        },
+
+        "PublicIP": {
+            "Description": "Endereço IP público do web server",
+            "Value": {
+                "Fn::GetAtt": [
+                    "WebServer",
+                    "PublicIp"
+                ]
+            }
+        },
+        "CloudWatchLogGroupName": {
+            "Description": "Nome do grupo do CloudWatch",
+            "Value": {
+                "Ref": "CloudFormationLogs"
+            }
+        }
+    }
+}
